@@ -6,8 +6,7 @@ A desktop application for viewing DJI MINI 4K drone footage with synchronized te
 
 ---
 
-https://github.com/swigggis/DJI-Telemetry/blob/61b0cbc37b914c7000d239f3c113fff4f4631018/screenshot.png
-
+![Screenshot](https://raw.githubusercontent.com/swigggis/DJI-Telemetry/61b0cbc37b914c7000d239f3c113fff4f4631018/screenshot.png)
 ## Features
 
 - Video playback with full transport controls
