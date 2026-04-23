@@ -5,12 +5,13 @@ import json
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QSlider, QLabel,
                              QFileDialog, QGridLayout, QGroupBox, QCheckBox,
-                             QComboBox, QProgressDialog, QSizePolicy, QFrame)
-from PyQt6.QtCore import Qt, QTimer, QUrl, QThread, pyqtSignal, QPointF, QRectF
+                             QComboBox, QProgressDialog, QSizePolicy, QFrame,
+                             QMenu, QMessageBox)
+from PyQt6.QtCore import Qt, QTimer, QUrl, QThread, pyqtSignal, QPointF, QRectF, QSettings
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QBrush, QPolygonF, QLinearGradient
+from PyQt6.QtGui import QPainter, QColor, QPen, QFont, QBrush, QPolygonF, QLinearGradient, QActionGroup
 import subprocess
 import tempfile
 import os
@@ -297,7 +298,7 @@ class MapWidget(QWebEngineView):
           return 'rgb('+r+','+g+','+b+')';
         }
 
-        function loadPath(points, minS, maxS, label){
+        function loadPath(points, minS, maxS, label, unitLabel){
           segments.forEach(function(s){map.removeLayer(s);});
           segments=[];
           if(points.length<2) return;
@@ -314,8 +315,8 @@ class MapWidget(QWebEngineView):
           map.fitBounds(L.latLngBounds(ll).pad(0.1));
           document.getElementById('legend').style.display='block';
           document.getElementById('leg-title').innerText=label;
-          document.getElementById('leg-min').innerText=minS.toFixed(1)+' m/s';
-          document.getElementById('leg-max').innerText=maxS.toFixed(1)+' m/s';
+          document.getElementById('leg-min').innerText=minS.toFixed(1)+' '+unitLabel;
+          document.getElementById('leg-max').innerText=maxS.toFixed(1)+' '+unitLabel;
         }
 
         function smoothPath(points, factor){
@@ -335,15 +336,20 @@ class MapWidget(QWebEngineView):
           return out;
         }
 
-        var _rawPoints=[], _minS=0, _maxS=1, _label='';
+        var _rawPoints=[], _minS=0, _maxS=1, _label='', _unitLabel='m/s';
 
-        function loadFullPath(points,minS,maxS,label,smooth){
-          _rawPoints=points; _minS=minS; _maxS=maxS; _label=label;
-          loadPath(smoothPath(points,smooth),minS,maxS,label);
+        function loadFullPath(points,minS,maxS,label,unitLabel,smooth){
+          _rawPoints=points; _minS=minS; _maxS=maxS; _label=label; _unitLabel=unitLabel;
+          loadPath(smoothPath(points,smooth),minS,maxS,label,unitLabel);
         }
 
         function updateSmooth(smooth){
-          loadPath(smoothPath(_rawPoints,smooth),_minS,_maxS,_label);
+          loadPath(smoothPath(_rawPoints,smooth),_minS,_maxS,_label,_unitLabel);
+        }
+
+        function updateLegendUnit(unitLabel){
+          _unitLabel = unitLabel;
+          loadPath(smoothPath(_rawPoints,0),_minS,_maxS,_label,_unitLabel);
         }
 
         function updatePosition(lat,lon){marker.setLatLng([lat,lon]);}
@@ -364,7 +370,7 @@ class MapWidget(QWebEngineView):
         self._ready = False
         self.setHtml(html)
 
-    def load_full_path(self, telemetry, speed_mode, smooth=0):
+    def load_full_path(self, telemetry, speed_mode, smooth=0, unit="m/s"):
         points, speeds = [], []
         for t in telemetry:
             lat, lon = t.get('gps_lat'), t.get('gps_lon')
@@ -376,10 +382,13 @@ class MapWidget(QWebEngineView):
             return
         mn, mx = min(speeds), max(speeds)
         label  = "Vertical Speed" if speed_mode == 'vertical' else "Horizontal Speed"
-        self._js(f"loadFullPath({json.dumps(points)},{mn},{mx},'{label}',{smooth});")
+        self._js(f"loadFullPath({json.dumps(points)},{mn},{mx},'{label}','{unit}',{smooth});")
 
     def update_smooth(self, smooth):
         self._js(f"updateSmooth({smooth});")
+
+    def update_legend_unit(self, unit):
+        self._js(f"updateLegendUnit('{unit}');")
 
     def update_position(self, lat, lon):
         self._js(f"updatePosition({lat},{lon});")
@@ -412,10 +421,187 @@ class DJITelemetryViewer(QMainWindow):
         self.speed_mode     = 'horizontal'
         self.smooth_value   = 0
 
+        # Settings
+        self.settings = QSettings("DJITelemetryViewer", "Settings")
+        self.lang = self.settings.value("language", "en")
+        self.units = self.settings.value("units", "metric")   # 'metric' or 'imperial'
+        self.theme = self.settings.value("theme", "dark")     # 'dark' or 'light'
+
         self.sub_timer = QTimer()
         self.sub_timer.timeout.connect(self._update_telemetry)
 
+        # Translation strings
+        self.strings = {}
+        self._init_strings()
+
+        # References for dynamic updates
+        self.height_name_lbl = None
+        self.height_unit_lbl = None
+        self.hspeed_name_lbl = None
+        self.hspeed_unit_lbl = None
+        self.vspeed_name_lbl = None
+        self.vspeed_unit_lbl = None
+        self.gps_alt_unit = "m"
+        self.distance_unit = "m"
+
         self._setup_ui()
+        self.apply_theme()
+        self.apply_language()
+        self.apply_units()
+
+    def _init_strings(self):
+        self.strings = {
+            'en': {
+                'window_title': 'DJI MINI 4K – Telemetry Viewer',
+                'primary_flight': 'Primary Flight Data',
+                'height': 'Height',
+                'horiz_speed': 'Horiz. Speed',
+                'vert_speed': 'Vert. Speed',
+                'heading': 'Heading',
+                'camera_gps': 'Camera & GPS',
+                'aperture': 'Aperture',
+                'shutter': 'Shutter',
+                'iso': 'ISO',
+                'ev': 'EV',
+                'zoom': 'D.Zoom',
+                'gps_lat': 'GPS Lat',
+                'gps_lon': 'GPS Lon',
+                'gps_alt': 'GPS Alt',
+                'distance': 'Distance',
+                'show_path': 'Show flight path',
+                'color_by': 'Color by:',
+                'horizontal_speed': 'Horizontal Speed',
+                'vertical_speed': 'Vertical Speed',
+                'path_smoothing': 'Path smoothing:',
+                'file_menu': 'File',
+                'open_video': 'Open Video…',
+                'quit': 'Quit',
+                'options_menu': 'Options',
+                'language_menu': 'Language',
+                'english': 'English',
+                'german': 'German',
+                'french': 'French',
+                'units_menu': 'Units',
+                'metric': 'Metric (m, m/s)',
+                'imperial': 'Imperial (ft, mph)',
+                'theme_menu': 'Theme',
+                'dark': 'Dark',
+                'light': 'Light',
+                'no_video': 'No video loaded',
+                'ffmpeg_error': '❌ FFmpeg not found!',
+                'extracting': 'Extracting telemetry…',
+                'building_path': 'Building flight path…',
+                'ok': 'OK',
+                'wait_title': 'Please wait',
+                'speed_unit_ms': 'm/s',
+                'speed_unit_mph': 'mph',
+                'height_unit_m': 'm',
+                'height_unit_ft': 'ft',
+                'play': 'Play',
+                'pause': 'Pause',
+                'stop': 'Stop',
+            },
+            'de': {
+                'window_title': 'DJI MINI 4K – Telemetrie-Viewer',
+                'primary_flight': 'Primäre Flugdaten',
+                'height': 'Höhe',
+                'horiz_speed': 'Horiz. Geschw.',
+                'vert_speed': 'Vert. Geschw.',
+                'heading': 'Kurs',
+                'camera_gps': 'Kamera & GPS',
+                'aperture': 'Blende',
+                'shutter': 'Verschluss',
+                'iso': 'ISO',
+                'ev': 'EV',
+                'zoom': 'D.Zoom',
+                'gps_lat': 'GPS Breite',
+                'gps_lon': 'GPS Länge',
+                'gps_alt': 'GPS Höhe',
+                'distance': 'Entfernung',
+                'show_path': 'Flugpfad anzeigen',
+                'color_by': 'Färben nach:',
+                'horizontal_speed': 'Horizontale Geschw.',
+                'vertical_speed': 'Vertikale Geschw.',
+                'path_smoothing': 'Pfadglättung:',
+                'file_menu': 'Datei',
+                'open_video': 'Video öffnen…',
+                'quit': 'Beenden',
+                'options_menu': 'Optionen',
+                'language_menu': 'Sprache',
+                'english': 'Englisch',
+                'german': 'Deutsch',
+                'french': 'Französisch',
+                'units_menu': 'Einheiten',
+                'metric': 'Metrisch (m, m/s)',
+                'imperial': 'Imperial (ft, mph)',
+                'theme_menu': 'Erscheinungsbild',
+                'dark': 'Dunkel',
+                'light': 'Hell',
+                'no_video': 'Kein Video geladen',
+                'ffmpeg_error': '❌ FFmpeg nicht gefunden!',
+                'extracting': 'Extrahiere Telemetrie…',
+                'building_path': 'Erstelle Flugpfad…',
+                'ok': 'OK',
+                'wait_title': 'Bitte warten',
+                'speed_unit_ms': 'm/s',
+                'speed_unit_mph': 'mph',
+                'height_unit_m': 'm',
+                'height_unit_ft': 'ft',
+                'play': 'Abspielen',
+                'pause': 'Pause',
+                'stop': 'Stopp',
+            },
+            'fr': {
+                'window_title': 'DJI MINI 4K – Visualisateur de télémétrie',
+                'primary_flight': 'Données de vol principales',
+                'height': 'Altitude',
+                'horiz_speed': 'Vitesse horiz.',
+                'vert_speed': 'Vitesse vert.',
+                'heading': 'Cap',
+                'camera_gps': 'Caméra & GPS',
+                'aperture': 'Ouverture',
+                'shutter': 'Vitesse',
+                'iso': 'ISO',
+                'ev': 'EV',
+                'zoom': 'Z. num.',
+                'gps_lat': 'Lat. GPS',
+                'gps_lon': 'Long. GPS',
+                'gps_alt': 'Alt. GPS',
+                'distance': 'Distance',
+                'show_path': 'Afficher trajectoire',
+                'color_by': 'Couleur par :',
+                'horizontal_speed': 'Vitesse horizontale',
+                'vertical_speed': 'Vitesse verticale',
+                'path_smoothing': 'Lissage trajectoire :',
+                'file_menu': 'Fichier',
+                'open_video': 'Ouvrir vidéo…',
+                'quit': 'Quitter',
+                'options_menu': 'Options',
+                'language_menu': 'Langue',
+                'english': 'Anglais',
+                'german': 'Allemand',
+                'french': 'Français',
+                'units_menu': 'Unités',
+                'metric': 'Métrique (m, m/s)',
+                'imperial': 'Impérial (ft, mph)',
+                'theme_menu': 'Thème',
+                'dark': 'Sombre',
+                'light': 'Clair',
+                'no_video': 'Aucune vidéo chargée',
+                'ffmpeg_error': '❌ FFmpeg introuvable !',
+                'extracting': 'Extraction de la télémétrie…',
+                'building_path': 'Construction de la trajectoire…',
+                'ok': 'OK',
+                'wait_title': 'Veuillez patienter',
+                'speed_unit_ms': 'm/s',
+                'speed_unit_mph': 'mph',
+                'height_unit_m': 'm',
+                'height_unit_ft': 'pi',
+                'play': 'Lecture',
+                'pause': 'Pause',
+                'stop': 'Arrêt',
+            }
+        }
 
     # ── UI Construction ────────────────────────
     def _setup_ui(self):
@@ -451,61 +637,66 @@ class DJITelemetryViewer(QMainWindow):
         outer_h.setSpacing(8)
 
         # ── Big readouts (Height + Speeds) ──────
-        big_group = QGroupBox("Primary Flight Data")
-        big_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;}")
-        big_v = QVBoxLayout(big_group)
+        self.big_group = QGroupBox()
+        self.big_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;}")
+        big_v = QVBoxLayout(self.big_group)
         big_v.setSpacing(4)
 
         self.lbl_height  = self._big_label("--")
         self.lbl_hspeed  = self._big_label("--")
         self.lbl_vspeed  = self._big_label("--")
 
-        big_v.addLayout(self._labeled_big("Height",          self.lbl_height,  "m"))
-        big_v.addLayout(self._labeled_big("Horiz. Speed",    self.lbl_hspeed,  "m/s"))
-        big_v.addLayout(self._labeled_big("Vert. Speed",     self.lbl_vspeed,  "m/s"))
+        self.height_layout, self.height_name_lbl, self.height_unit_lbl = self._labeled_big("", self.lbl_height, "")
+        self.hspeed_layout, self.hspeed_name_lbl, self.hspeed_unit_lbl = self._labeled_big("", self.lbl_hspeed, "")
+        self.vspeed_layout, self.vspeed_name_lbl, self.vspeed_unit_lbl = self._labeled_big("", self.lbl_vspeed, "")
+
+        big_v.addLayout(self.height_layout)
+        big_v.addLayout(self.hspeed_layout)
+        big_v.addLayout(self.vspeed_layout)
 
         # ── Compass ─────────────────────────────
-        compass_group = QGroupBox("Heading")
-        compass_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;}")
-        compass_v = QVBoxLayout(compass_group)
+        self.compass_group = QGroupBox()
+        self.compass_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;}")
+        compass_v = QVBoxLayout(self.compass_group)
         self.compass = CompassWidget()
         compass_v.addWidget(self.compass, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # ── Secondary telemetry grid ─────────────
-        sec_group = QGroupBox("Camera & GPS")
-        sec_group.setStyleSheet("QGroupBox{font-weight:bold;font-size:13px;}")
-        grid = QGridLayout(sec_group)
+        self.sec_group = QGroupBox()
+        grid = QGridLayout(self.sec_group)
         grid.setSpacing(4)
 
         self.sec_labels = {}
         fields = [
-            ("Aperture",    "f_stop",       ""),
-            ("Shutter",     "shutter_speed",""),
-            ("ISO",         "iso",          ""),
-            ("EV",          "ev",           ""),
-            ("D.Zoom",      "digital_zoom", ""),
-            ("GPS Lat",     "gps_lat",      "°"),
-            ("GPS Lon",     "gps_lon",      "°"),
-            ("GPS Alt",     "gps_alt",      " m"),
-            ("Distance",    "distance",     " m"),
+            ("aperture",    "f_stop",       ""),
+            ("shutter",     "shutter_speed",""),
+            ("iso",         "iso",          ""),
+            ("ev",          "ev",           ""),
+            ("zoom",        "digital_zoom", ""),
+            ("gps_lat",     "gps_lat",      "°"),
+            ("gps_lon",     "gps_lon",      "°"),
+            ("gps_alt",     "gps_alt",      ""),
+            ("distance",    "distance",     ""),
         ]
         r = c = 0
-        for name, key, unit in fields:
-            nl = QLabel(f"<b>{name}:</b>")
+        self.sec_name_labels = {}
+        for name_key, key, unit in fields:
+            nl = QLabel()
             nl.setStyleSheet("font-size:11px;")
             vl = QLabel("--")
             vl.setStyleSheet("color:#0066cc;font-size:12px;font-weight:bold;")
             grid.addWidget(nl, r, c*2)
             grid.addWidget(vl, r, c*2+1)
             self.sec_labels[key] = (vl, unit)
+            self.sec_name_labels[name_key] = nl
             c += 1
             if c >= 3:
                 c = 0
                 r += 1
 
-        outer_h.addWidget(big_group,    stretch=0)
-        outer_h.addWidget(compass_group,stretch=0)
-        outer_h.addWidget(sec_group,    stretch=1)
+        outer_h.addWidget(self.big_group,    stretch=0)
+        outer_h.addWidget(self.compass_group,stretch=0)
+        outer_h.addWidget(self.sec_group,    stretch=1)
         return outer
 
     def _big_label(self, text):
@@ -527,7 +718,7 @@ class DJITelemetryViewer(QMainWindow):
         row.addStretch()
         row.addWidget(val_lbl)
         row.addWidget(unit_lbl)
-        return row
+        return row, name_lbl, unit_lbl
 
     def _build_controls(self):
         layout = QVBoxLayout()
@@ -545,25 +736,28 @@ class DJITelemetryViewer(QMainWindow):
 
         # Buttons
         btn_row = QHBoxLayout()
-        for label, cb in [
-            ("⏪ -10s",  lambda: self._skip(-10000)),
-            ("⏮ -1s",   lambda: self._skip(-1000)),
-            ("▶ Play",   self._play_pause),
-            ("⏹ Stop",   self._stop),
-            ("⏭ +1s",   lambda: self._skip(1000)),
-            ("⏩ +10s",  lambda: self._skip(10000)),
+        self.buttons = {}
+        for label_id, cb in [
+            ("skip_back_10", lambda: self._skip(-10000)),
+            ("skip_back_1",  lambda: self._skip(-1000)),
+            ("play",         self._play_pause),
+            ("stop",         self._stop),
+            ("skip_forward_1", lambda: self._skip(1000)),
+            ("skip_forward_10", lambda: self._skip(10000)),
         ]:
-            b = QPushButton(label)
+            b = QPushButton()
             b.setMinimumHeight(34)
-            if label == "▶ Play":
+            if label_id == "play":
                 self.play_btn = b
             b.clicked.connect(cb)
             btn_row.addWidget(b)
+            self.buttons[label_id] = b
         layout.addLayout(btn_row)
 
         # Volume + status
         bot = QHBoxLayout()
-        bot.addWidget(QLabel("🔊"))
+        self.vol_label = QLabel("🔊")
+        bot.addWidget(self.vol_label)
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setValue(50)
@@ -571,7 +765,7 @@ class DJITelemetryViewer(QMainWindow):
         self.vol_slider.valueChanged.connect(lambda v: self.audio_output.setVolume(v/100))
         bot.addWidget(self.vol_slider)
         bot.addStretch()
-        self.status_lbl = QLabel("No video loaded")
+        self.status_lbl = QLabel()
         self.status_lbl.setStyleSheet("color:gray;font-size:11px;")
         bot.addWidget(self.status_lbl)
         layout.addLayout(bot)
@@ -586,13 +780,15 @@ class DJITelemetryViewer(QMainWindow):
 
         row1 = QHBoxLayout()
 
-        self.path_cb = QCheckBox("Show flight path")
+        self.path_cb = QCheckBox()
         self.path_cb.setChecked(True)
         self.path_cb.stateChanged.connect(
-            lambda s: self.map_widget.set_path_visible(s == Qt.CheckState.Checked.value))
+            lambda s: self.map_widget.set_path_visible(s == Qt.CheckState.CheckState.Checked.value))
         row1.addWidget(self.path_cb)
 
-        row1.addWidget(QLabel("Color by:"))
+        self.color_label = QLabel()
+        row1.addWidget(self.color_label)
+
         self.speed_combo = QComboBox()
         self.speed_combo.addItem("Horizontal Speed", "horizontal")
         self.speed_combo.addItem("Vertical Speed",   "vertical")
@@ -602,7 +798,8 @@ class DJITelemetryViewer(QMainWindow):
         layout.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Path smoothing:"))
+        self.smooth_label = QLabel()
+        row2.addWidget(self.smooth_label)
         self.smooth_slider = QSlider(Qt.Orientation.Horizontal)
         self.smooth_slider.setRange(0, 50)
         self.smooth_slider.setValue(0)
@@ -618,11 +815,194 @@ class DJITelemetryViewer(QMainWindow):
         return layout
 
     def _build_menu(self):
-        mb   = self.menuBar()
-        fmnu = mb.addMenu("File")
-        fmnu.addAction("Open Video…", self._open_file)
-        fmnu.addSeparator()
-        fmnu.addAction("Quit", self.close)
+        mb = self.menuBar()
+        self.file_menu = mb.addMenu("")
+        self.file_menu.addAction("", self._open_file)
+        self.file_menu.addSeparator()
+        self.file_menu.addAction("", self.close)
+
+        self.options_menu = mb.addMenu("")
+
+        # Language submenu
+        self.language_menu = self.options_menu.addMenu("")
+        self.lang_group = QActionGroup(self)
+        for lang_code, lang_name in [("en", "English"), ("de", "German"), ("fr", "French")]:
+            action = self.language_menu.addAction(lang_name)
+            action.setCheckable(True)
+            action.setData(lang_code)
+            if self.lang == lang_code:
+                action.setChecked(True)
+            action.triggered.connect(self._change_language)
+            self.lang_group.addAction(action)
+
+        # Units submenu
+        self.units_menu = self.options_menu.addMenu("")
+        self.units_group = QActionGroup(self)
+        for unit_key, unit_name in [("metric", "Metric (m, m/s)"), ("imperial", "Imperial (ft, mph)")]:
+            action = self.units_menu.addAction(unit_name)
+            action.setCheckable(True)
+            action.setData(unit_key)
+            if self.units == unit_key:
+                action.setChecked(True)
+            action.triggered.connect(self._change_units)
+            self.units_group.addAction(action)
+
+        # Theme submenu
+        self.theme_menu = self.options_menu.addMenu("")
+        self.theme_group = QActionGroup(self)
+        for theme_key, theme_name in [("dark", "Dark"), ("light", "Light")]:
+            action = self.theme_menu.addAction(theme_name)
+            action.setCheckable(True)
+            action.setData(theme_key)
+            if self.theme == theme_key:
+                action.setChecked(True)
+            action.triggered.connect(self._change_theme)
+            self.theme_group.addAction(action)
+
+    # ── Settings methods ───────────────────────
+    def _change_language(self):
+        action = self.sender()
+        if action:
+            self.lang = action.data()
+            self.settings.setValue("language", self.lang)
+            self.apply_language()
+
+    def _change_units(self):
+        action = self.sender()
+        if action:
+            self.units = action.data()
+            self.settings.setValue("units", self.units)
+            self.apply_units()
+
+    def _change_theme(self):
+        action = self.sender()
+        if action:
+            self.theme = action.data()
+            self.settings.setValue("theme", self.theme)
+            self.apply_theme()
+
+    def apply_language(self):
+        s = self.strings[self.lang]
+        self.setWindowTitle(s['window_title'])
+        self.big_group.setTitle(s['primary_flight'])
+        self.compass_group.setTitle(s['heading'])
+        self.sec_group.setTitle(s['camera_gps'])
+
+        # Update big readout labels
+        self.height_name_lbl.setText(s['height'])
+        self.hspeed_name_lbl.setText(s['horiz_speed'])
+        self.vspeed_name_lbl.setText(s['vert_speed'])
+
+        # Update secondary field names
+        name_map = {
+            'aperture': s['aperture'], 'shutter': s['shutter'], 'iso': s['iso'],
+            'ev': s['ev'], 'zoom': s['zoom'], 'gps_lat': s['gps_lat'],
+            'gps_lon': s['gps_lon'], 'gps_alt': s['gps_alt'], 'distance': s['distance']
+        }
+        for key, label in name_map.items():
+            if key in self.sec_name_labels:
+                self.sec_name_labels[key].setText(f"<b>{label}:</b>")
+
+        # Map controls
+        self.path_cb.setText(s['show_path'])
+        self.color_label.setText(s['color_by'])
+        self.smooth_label.setText(s['path_smoothing'])
+
+        # Combo items
+        self.speed_combo.setItemText(0, s['horizontal_speed'])
+        self.speed_combo.setItemText(1, s['vertical_speed'])
+
+        # Menu
+        self.file_menu.setTitle(s['file_menu'])
+        self.file_menu.actions()[0].setText(s['open_video'])
+        self.file_menu.actions()[2].setText(s['quit'])
+        self.options_menu.setTitle(s['options_menu'])
+        self.language_menu.setTitle(s['language_menu'])
+        self.units_menu.setTitle(s['units_menu'])
+        self.theme_menu.setTitle(s['theme_menu'])
+
+        # Units and theme menu texts
+        for action in self.units_menu.actions():
+            if action.data() == "metric":
+                action.setText(s['metric'])
+            elif action.data() == "imperial":
+                action.setText(s['imperial'])
+        for action in self.theme_menu.actions():
+            if action.data() == "dark":
+                action.setText(s['dark'])
+            elif action.data() == "light":
+                action.setText(s['light'])
+
+        # Buttons
+        self.buttons["skip_back_10"].setText("⏪ -10s")
+        self.buttons["skip_back_1"].setText("⏮ -1s")
+        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.play_btn.setText("⏸ " + s.get('pause', 'Pause'))
+        else:
+            self.play_btn.setText("▶ " + s.get('play', 'Play'))
+        self.buttons["stop"].setText("⏹ " + s.get('stop', 'Stop'))
+        self.buttons["skip_forward_1"].setText("⏭ +1s")
+        self.buttons["skip_forward_10"].setText("⏩ +10s")
+
+        # Status
+        if not self.telemetry_data:
+            self.status_lbl.setText(s['no_video'])
+
+    def apply_units(self):
+        s = self.strings[self.lang]
+        if self.units == "metric":
+            self.height_unit_lbl.setText(s['height_unit_m'])
+            self.hspeed_unit_lbl.setText(s['speed_unit_ms'])
+            self.vspeed_unit_lbl.setText(s['speed_unit_ms'])
+            self.gps_alt_unit = s['height_unit_m']
+            self.distance_unit = s['height_unit_m']
+        else:  # imperial
+            self.height_unit_lbl.setText(s['height_unit_ft'])
+            self.hspeed_unit_lbl.setText(s['speed_unit_mph'])
+            self.vspeed_unit_lbl.setText(s['speed_unit_mph'])
+            self.gps_alt_unit = s['height_unit_ft']
+            self.distance_unit = s['height_unit_ft']
+
+        # Update map legend unit
+        self._update_map_unit()
+        # Force telemetry refresh to show converted values
+        self._update_telemetry()
+
+    def _update_map_unit(self):
+        unit_txt = self.strings[self.lang]['speed_unit_ms'] if self.units == "metric" else self.strings[self.lang]['speed_unit_mph']
+        self.map_widget.update_legend_unit(unit_txt)
+
+    def apply_theme(self):
+        if self.theme == "dark":
+            dark_style = """
+            QMainWindow { background-color: #1e1e2e; }
+            QWidget { background-color: #1e1e2e; color: #e0e0e0; }
+            QGroupBox { border: 1px solid #3a3a4a; border-radius: 5px; margin-top: 10px; font-weight: bold; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
+            QPushButton { background-color: #2d2d3a; border: 1px solid #5a5a70; border-radius: 4px; padding: 5px; color: #ffffff; }
+            QPushButton:hover { background-color: #3d3d4e; }
+            QSlider::groove:horizontal { height: 6px; background: #3a3a4a; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #00aaff; width: 14px; margin: -4px 0; border-radius: 7px; }
+            QLabel { color: #e0e0e0; }
+            QComboBox { background-color: #2d2d3a; border: 1px solid #5a5a70; border-radius: 3px; padding: 2px; }
+            QCheckBox { color: #e0e0e0; }
+            """
+            QApplication.instance().setStyleSheet(dark_style)
+        else:
+            light_style = """
+            QMainWindow { background-color: #f0f0f0; }
+            QWidget { background-color: #f0f0f0; color: #202020; }
+            QGroupBox { border: 1px solid #b0b0b0; border-radius: 5px; margin-top: 10px; font-weight: bold; background-color: #ffffff; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
+            QPushButton { background-color: #e0e0e0; border: 1px solid #a0a0a0; border-radius: 4px; padding: 5px; color: #202020; }
+            QPushButton:hover { background-color: #d0d0d0; }
+            QSlider::groove:horizontal { height: 6px; background: #c0c0c0; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #0077aa; width: 14px; margin: -4px 0; border-radius: 7px; }
+            QLabel { color: #202020; }
+            QComboBox { background-color: #ffffff; border: 1px solid #a0a0a0; border-radius: 3px; padding: 2px; }
+            QCheckBox { color: #202020; }
+            """
+            QApplication.instance().setStyleSheet(light_style)
 
     # ── File Opening ───────────────────────────
     def _find_ffmpeg(self):
@@ -638,7 +1018,7 @@ class DJITelemetryViewer(QMainWindow):
 
     def _open_file(self):
         fn, _ = QFileDialog.getOpenFileName(
-            self, "Open DJI Video", "", "Video Files (*.mp4 *.mov *.avi)")
+            self, self.strings[self.lang]['open_video'], "", "Video Files (*.mp4 *.mov *.avi)")
         if not fn:
             return
 
@@ -654,11 +1034,11 @@ class DJITelemetryViewer(QMainWindow):
 
         ffmpeg = self._find_ffmpeg()
         if not ffmpeg:
-            self.status_lbl.setText("❌ FFmpeg not found!")
+            self.status_lbl.setText(self.strings[self.lang]['ffmpeg_error'])
             return
 
-        self._prog = QProgressDialog("Extracting telemetry…", None, 0, 0, self)
-        self._prog.setWindowTitle("Please wait")
+        self._prog = QProgressDialog(self.strings[self.lang]['extracting'], None, 0, 0, self)
+        self._prog.setWindowTitle(self.strings[self.lang]['wait_title'])
         self._prog.setWindowModality(Qt.WindowModality.WindowModal)
         self._prog.setCancelButton(None)
         self._prog.show()
@@ -680,13 +1060,15 @@ class DJITelemetryViewer(QMainWindow):
             self._prog.close()
 
     def _on_extracted(self, subtitles):
-        self._prog.setLabelText("Building flight path…")
+        self._prog.setLabelText(self.strings[self.lang]['building_path'])
         self.subtitles      = subtitles
         self.telemetry_data = TelemetryParser.parse_all(subtitles)
 
         if self.telemetry_data:
+            self._update_map_unit()
             self.map_widget.load_full_path(
-                self.telemetry_data, self.speed_mode, self.smooth_value)
+                self.telemetry_data, self.speed_mode, self.smooth_value,
+                self.strings[self.lang]['speed_unit_ms'] if self.units == "metric" else self.strings[self.lang]['speed_unit_mph'])
             self.sub_timer.start(100)
 
         self._prog.close()
@@ -696,8 +1078,9 @@ class DJITelemetryViewer(QMainWindow):
     def _change_speed_mode(self):
         self.speed_mode = self.speed_combo.currentData()
         if self.telemetry_data:
+            unit = self.strings[self.lang]['speed_unit_ms'] if self.units == "metric" else self.strings[self.lang]['speed_unit_mph']
             self.map_widget.load_full_path(
-                self.telemetry_data, self.speed_mode, self.smooth_value)
+                self.telemetry_data, self.speed_mode, self.smooth_value, unit)
 
     def _change_smooth(self, val):
         self.smooth_value = val
@@ -705,7 +1088,7 @@ class DJITelemetryViewer(QMainWindow):
         if self.telemetry_data:
             self.map_widget.update_smooth(val)
 
-    # ── Telemetry update ───────────────────────
+    # ── Telemetry update with unit conversion ──
     def _update_telemetry(self):
         pos = self.media_player.position()
         td  = self.telemetry_data
@@ -725,15 +1108,27 @@ class DJITelemetryViewer(QMainWindow):
         if not found:
             return
 
-        # Big readouts
-        h  = found.get('height',  0) or 0
+        # Apply unit conversions
+        h  = found.get('height', 0) or 0
         hs = found.get('h_speed', 0) or 0
         vs = found.get('v_speed', 0) or 0
+        gps_alt = found.get('gps_alt', None)
+        dist = found.get('distance', None)
+
+        if self.units == "imperial":
+            h  = h * 3.28084          # meters to feet
+            hs = hs * 2.23694         # m/s to mph
+            vs = vs * 2.23694
+            if gps_alt is not None:
+                gps_alt = gps_alt * 3.28084
+            if dist is not None:
+                dist = dist * 3.28084
+
         self.lbl_height.setText(f"{h:.1f}")
         self.lbl_hspeed.setText(f"{hs:.2f}")
         self.lbl_vspeed.setText(f"{vs:.2f}")
 
-        # Secondary grid
+        # Secondary grid (some fields don't need conversion)
         fmt = {
             'f_stop':        lambda v: str(v),
             'shutter_speed': lambda v: str(v),
@@ -747,7 +1142,16 @@ class DJITelemetryViewer(QMainWindow):
         }
         for key, (lbl, unit) in self.sec_labels.items():
             v = found.get(key)
-            lbl.setText((fmt[key](v) + unit) if v is not None else "--")
+            if key == 'gps_alt' and gps_alt is not None:
+                v = gps_alt
+                unit = " " + self.gps_alt_unit
+            elif key == 'distance' and dist is not None:
+                v = dist
+                unit = " " + self.distance_unit
+            if v is not None:
+                lbl.setText(fmt[key](v) + unit)
+            else:
+                lbl.setText("--")
 
         # Map position
         lat, lon = found.get('gps_lat'), found.get('gps_lon')
@@ -785,16 +1189,17 @@ class DJITelemetryViewer(QMainWindow):
 
     # ── Playback controls ──────────────────────
     def _play_pause(self):
+        s = self.strings[self.lang]
         if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.media_player.pause()
-            self.play_btn.setText("▶ Play")
+            self.play_btn.setText("▶ " + s.get('play', 'Play'))
         else:
             self.media_player.play()
-            self.play_btn.setText("⏸ Pause")
+            self.play_btn.setText("⏸ " + s.get('pause', 'Pause'))
 
     def _stop(self):
         self.media_player.stop()
-        self.play_btn.setText("▶ Play")
+        self.play_btn.setText("▶ " + self.strings[self.lang].get('play', 'Play'))
 
     def _skip(self, ms):
         self.media_player.setPosition(max(0, self.media_player.position()+ms))
