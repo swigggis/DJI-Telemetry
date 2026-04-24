@@ -30,8 +30,8 @@ A desktop application for viewing DJI MINI 4K drone footage with synchronized te
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourname/dji-telemetry-viewer.git
-cd dji-telemetry-viewer
+git clone https://github.com/swigggis/DJI-Telemetry.git
+cd DJI-Telemetry
 ```
 
 ### 2. Install Python dependencies
